@@ -1,0 +1,11 @@
+{
+  "indicatorType": "saleSummary",
+  "indicator": "cid_name,uni_settler_amt,uni_settler_return_amt,cps_settler_net_amt,cps_funds_cost_amt,cps_funds_net_gift_cost_amt,cps_funds_net_profit,cps_funds_net_profit_ratio,uni_settler_store_num,uni_settler_goods_num,uni_settler_sales_bill_num,uni_settler_return_bill_num,cps_order_sales_weight_kg,cps_settler_sales_weight_kg,cps_return_weight_kg,cps_settler_sales_net_weight_kg,cps_order_sales_weight_ton,cps_settler_sales_weight_ton,cps_return_weight_ton,cps_settler_sales_net_weight_ton",
+  "summary": true,
+  "dateRange": { "beginDate": "2025-06-01", "endDate": "2025-06-27" },
+  "page": { "current": 1, "size": 20 },
+  "condition": { "in": {}, "match": {} },
+  "groupBy": ["cid"],
+  "having": [],
+  "showType": "fact"
+}
