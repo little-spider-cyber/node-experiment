@@ -14,6 +14,35 @@ type TCPConn = {
     reject: (reason: Error) => void;
   };
 };
+class HTTPError extends Error {
+  code;
+  constructor(code: number, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+// a parsed HTTP request header
+type HTTPReq = {
+  method: string;
+  uri: Buffer;
+  version: string;
+  headers: Buffer[];
+};
+
+// an HTTP response
+type HTTPRes = {
+  code: number;
+  headers: Buffer[];
+  body: BodyReader;
+};
+
+// an interface for reading/writing data from/to the HTTP body.
+type BodyReader = {
+  // the "Content-Length", -1 if unknown.
+  length: number;
+  // read data. returns an empty buffer after EOF.
+  read: () => Promise<Buffer>;
+};
 
 // A dynamic-sized buffer
 type DynBuf = {
@@ -90,43 +119,153 @@ async function serveClient(socket: Socket) {
     length: 0,
   };
   while (true) {
-    const msg = cutMessage(buf);
+    const msg: HTTPReq | null = cutMessage(buf);
     if (!msg) {
       const data = await soRead(conn);
       bufPush(buf, data);
-      if (data.length === 0) {
+      if (data.length === 0 && buf.length === 0) {
         console.log("connection ended");
         return;
       }
+      if (data.length === 0) {
+        throw new HTTPError(400, "Unexpected EOF");
+      }
       continue;
     }
-    // process the message and send the response
-    if (msg.equals(Buffer.from("quit\n"))) {
-      await soWrite(conn, Buffer.from("Bye.\n"));
-      socket.destroy();
-      return;
-    } else {
-      const reply = Buffer.concat([Buffer.from("Echo: "), msg]);
-      await soWrite(conn, reply);
-    }
+    const reqBody: BodyReader = readerFromReq();
+    // // process the message and send the response
+    // if (msg.equals(Buffer.from("quit\n"))) {
+    //   await soWrite(conn, Buffer.from("Bye.\n"));
+    //   socket.destroy();
+    //   return;
+    // } else {
+    //   const reply = Buffer.concat([Buffer.from("Echo: "), msg]);
+    //   await soWrite(conn, reply);
+    // }
   }
 }
 
-function cutMessage(buf: DynBuf): null | Buffer {
+const splitter = "\r\n\r\n";
+const kMaxHeaderLen = 1024 * 8;
+function cutMessage(buf: DynBuf): null | HTTPReq {
   // messages are separated by '\n'
-  const idx = buf.data.subarray(0, buf.length).indexOf("\n");
+  const idx = buf.data.subarray(0, buf.length).indexOf(splitter);
   if (idx < 0) {
+    if (buf.length > kMaxHeaderLen) {
+      throw new HTTPError(413, "Request Header Fields Too Large");
+    }
     return null; // not complete
   }
   // make a copy of the message and move the remaining data to the front
-  const msg = Buffer.from(buf.data.subarray(0, idx + 1));
+  const msg = parseHTTPReq(buf.data.subarray(0, idx + 4));
   bufPop(buf, idx + 1);
   return msg;
+}
+
+function parseHTTPReq(buf: Buffer): HTTPReq {
+  const lines = splitLines(buf);
+  const firstLine = lines[0];
+  const [method, uri, version] = firstLine?.toString().split(" ") ?? [];
+  const headers: Buffer[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i] ?? Buffer.from("");
+    if (!validateHeader(line)) {
+      throw new HTTPError(400, "Invalid header, line: " + line.toString());
+    }
+    headers.push(line);
+  }
+  if (!method || !uri || !version) {
+    throw new HTTPError(
+      400,
+      "Invalid request, method: " +
+        method +
+        ", uri: " +
+        uri +
+        ", version: " +
+        version
+    );
+  }
+  return {
+    method,
+    uri: Buffer.from(uri),
+    version,
+    headers,
+  };
+}
+
+function splitLines(buf: Buffer): Buffer[] {
+  const lines: Buffer[] = [];
+  let start = 0;
+
+  // Scan through buffer looking for \r\n line endings
+  for (let i = 0; i < buf.length - 1; i++) {
+    if (buf[i] === 0x0d && buf[i + 1] === 0x0a) {
+      // \r\n
+      // Extract line from start to current position
+      lines.push(buf.subarray(start, i));
+      // Skip over \r\n
+      i++;
+      // Next line starts after \r\n
+      start = i + 1;
+    }
+  }
+  return lines;
+}
+
+function validateHeader(header: Buffer): boolean {
+  const [key, value] = header.toString().split(": ");
+  if (key && value) {
+    return true;
+  }
+  return false;
 }
 // remove data from the front
 function bufPop(buf: DynBuf, len: number): void {
   buf.data.copyWithin(0, len, buf.length);
   buf.length -= len;
+}
+
+function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
+  let bodyLen = -1;
+  const contentLen = fieldGet(req.headers, "Content-Length");
+  if (contentLen) {
+    bodyLen = parseInt(contentLen.toString("latin1"));
+    if (isNaN(bodyLen)) {
+      throw new HTTPError(400, "bad Content-Length.");
+    }
+  }
+  const bodyAllowed = !(req.method === "GET" || req.method === "HEAD");
+  const chunked =
+    fieldGet(req.headers, "Transfer-Encoding")?.toString() === "chunked" ||
+    false;
+  if (!bodyAllowed && (bodyLen > 0 || chunked)) {
+    throw new HTTPError(400, "HTTP body not allowed.");
+  }
+  if (!bodyAllowed) {
+    bodyLen = 0;
+  }
+  if (bodyLen >= 0) {
+    return readerFromConnLength(conn, buf, bodyLen);
+  } else if (chunked) {
+    throw new HTTPError(501, "TODO for chunked encoding");
+  } else {
+    throw new HTTPError(501, "TODO for EOF");
+  }
+}
+
+function readerFromConnLength(
+  conn: TCPConn,
+  buf: DynBuf,
+  bodyLen: number
+): BodyReader {}
+function fieldGet(headers: Buffer[], field: string): Buffer | null {
+  for (const header of headers) {
+    const [key, value] = header.toString().split(": ");
+    if (key === field) {
+      return Buffer.from(value ?? "");
+    }
+  }
+  return null;
 }
 
 async function newConn(socket: Socket) {
