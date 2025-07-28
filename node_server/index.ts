@@ -132,7 +132,17 @@ async function serveClient(socket: Socket) {
       }
       continue;
     }
-    const reqBody: BodyReader = readerFromReq();
+    const reqBody: BodyReader = readerFromReq(conn, buf, msg);
+    const res: HTTPRes = await handleReq(msg, reqBody);
+    await writeHTTPResp(conn, res);
+    // close the connection for HTTP/1.0
+    if (msg.version === "1.0") {
+      return;
+    }
+    // make sure that the request body is consumed completely
+    while ((await reqBody.read()).length > 0) {
+      /* empty */
+    }
     // // process the message and send the response
     // if (msg.equals(Buffer.from("quit\n"))) {
     //   await soWrite(conn, Buffer.from("Bye.\n"));
@@ -256,8 +266,31 @@ function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
 function readerFromConnLength(
   conn: TCPConn,
   buf: DynBuf,
-  bodyLen: number
-): BodyReader {}
+  remain: number
+): BodyReader {
+  return {
+    length: remain,
+    read: async (): Promise<Buffer> => {
+      if (remain <= 0) {
+        return Buffer.from(""); // EOF
+      }
+      if (buf.length <= 0) {
+        const data = await soRead(conn);
+        bufPush(buf, data);
+        if (data.length === 0) {
+          throw new HTTPError(400, "Unexpected EOF in request body");
+        }
+      }
+
+      // Consume what we need and put the rest back in buffer
+      const consume = Math.min(buf.length, remain);
+      const result = buf.data.subarray(0, consume);
+      remain -= consume;
+      bufPop(buf, consume);
+      return Buffer.from(result);
+    },
+  };
+}
 function fieldGet(headers: Buffer[], field: string): Buffer | null {
   for (const header of headers) {
     const [key, value] = header.toString().split(": ");
@@ -266,6 +299,59 @@ function fieldGet(headers: Buffer[], field: string): Buffer | null {
     }
   }
   return null;
+}
+
+async function handleReq(req: HTTPReq, reqBody: BodyReader): Promise<HTTPRes> {
+  let resBody: BodyReader;
+  switch (req.uri.toString()) {
+    case "/echo":
+      resBody = reqBody;
+      break;
+    default:
+      resBody = readerFromMemory(Buffer.from("hello world.\n"));
+      break;
+  }
+  return {
+    code: 200,
+    headers: [Buffer.from("Server: my_first_http_server")],
+    body: resBody,
+  };
+}
+
+async function writeHTTPResp(conn: TCPConn, res: HTTPRes): Promise<void> {
+  if (res.body.length < 0) {
+    throw new HTTPError(501, "TODO for chunked encoding");
+  }
+  res.headers.push(Buffer.from("Content-Length: " + res.body.length));
+  const headers = await encodeHTTPRespHeaders(res);
+  await soWrite(conn, headers);
+  while (true) {
+    const data = await res.body.read();
+    if (data.length === 0) {
+      break;
+    }
+    await soWrite(conn, data);
+  }
+}
+
+async function encodeHTTPRespHeaders(res: HTTPRes): Promise<Buffer> {
+  return Buffer.from(
+    "HTTP/1.1 200 OK\r\n" + res.headers.join("\r\n") + "\r\n\r\n"
+  );
+}
+
+function readerFromMemory(data: Buffer): BodyReader {
+  let isDone = false;
+  return {
+    length: data.length,
+    read: async (): Promise<Buffer> => {
+      if (isDone) {
+        return Buffer.from("");
+      }
+      isDone = true;
+      return data;
+    },
+  };
 }
 
 async function newConn(socket: Socket) {
