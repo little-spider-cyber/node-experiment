@@ -1,4 +1,5 @@
 import { createServer, Socket, Server } from "net";
+import { restraintLog } from "./utils";
 
 // A promise-based API for TCP sockets.
 type TCPConn = {
@@ -58,7 +59,7 @@ function soInit(sock: Socket): TCPConn {
     ended: false,
   };
   sock.on("data", (data) => {
-    console.log("🚀 ~ sock.on ~ data:", data.toString());
+    restraintLog(`"🚀 ~ sock.on ~ data:", ${data.toString()}`);
     conn.socket.pause();
     conn.reader?.resolve(data);
     conn.reader = null;
@@ -122,7 +123,14 @@ async function serveClient(socket: Socket) {
     const msg: HTTPReq | null = cutMessage(buf);
     if (!msg) {
       const data = await soRead(conn);
-      bufPush(buf, data);
+      if (conn.ended) {
+        // if the connection is ended, we should not read more data
+        if (buf.length > 0) {
+          throw new HTTPError(400, "Unexpected EOF with remaining data");
+        }
+        console.log("connection ended");
+        return;
+      }
       if (data.length === 0 && buf.length === 0) {
         console.log("connection ended");
         return;
@@ -130,8 +138,10 @@ async function serveClient(socket: Socket) {
       if (data.length === 0) {
         throw new HTTPError(400, "Unexpected EOF");
       }
+      bufPush(buf, data);
       continue;
     }
+    console.log("🚀 ~ serveClient ~ msg:", msg.headers.toString());
     const reqBody: BodyReader = readerFromReq(conn, buf, msg);
     const res: HTTPRes = await handleReq(msg, reqBody);
     await writeHTTPResp(conn, res);
@@ -167,8 +177,8 @@ function cutMessage(buf: DynBuf): null | HTTPReq {
     return null; // not complete
   }
   // make a copy of the message and move the remaining data to the front
-  const msg = parseHTTPReq(buf.data.subarray(0, idx + 4));
-  bufPop(buf, idx + 1);
+  const msg = parseHTTPReq(buf.data.subarray(0, idx));
+  bufPop(buf, idx + 4);
   return msg;
 }
 
@@ -288,11 +298,18 @@ function readerFromConnLength(
 
       // Consume what we need and put the rest back in buffer
       const consume = Math.min(buf.length, remain);
-      const result = buf.data.subarray(0, consume);
-      console.log("🚀 ~ readerFromConnLength ~ result:", result.toString());
+      const result = Buffer.from(buf.data.subarray(0, consume));
+      if (result.length < 20) {
+        console.log("🚀 ~ readerFromConnLength ~ result:", result.toString());
+      } else {
+        console.log(
+          "readerFromConnLength: result too long, length:",
+          result.length
+        );
+      }
       remain -= consume;
       bufPop(buf, consume);
-      return Buffer.from(result);
+      return result;
     },
   };
 }
@@ -329,10 +346,12 @@ async function writeHTTPResp(conn: TCPConn, res: HTTPRes): Promise<void> {
   }
   res.headers.push(Buffer.from("Content-Length: " + res.body.length));
   const headers = await encodeHTTPRespHeaders(res);
+  console.log("🚀 ~ writeHTTPResp ~ headers:", headers.toString("latin1"));
   await soWrite(conn, headers);
   while (true) {
     const data = await res.body.read();
-    console.log("🚀 ~ writeHTTPResp ~ data:", data.toString());
+
+    restraintLog(`"🚀 ~ writeHTTPResp ~ data:", ${data.toString()}`);
     if (data.length === 0) {
       break;
     }
@@ -407,10 +426,9 @@ async function startServer() {
     while (true) {
       const socket = await soAccept(server);
       // Process the connection asynchronously without blocking accept loop
-      newConn(socket).catch(console.error);
+      newConn(socket);
     }
   } catch (err) {
-    console.log("🚀 ~ server error:", err);
     console.error("Server error:", err);
   }
 }
@@ -434,3 +452,5 @@ function bufPush(buf: DynBuf, data: Buffer): void {
   data.copy(buf.data, buf.length, 0);
   buf.length = newLen;
 }
+
+
