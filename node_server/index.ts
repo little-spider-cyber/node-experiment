@@ -1,4 +1,4 @@
-import { createServer, Socket } from "net";
+import { createServer, Socket, Server } from "net";
 
 // A promise-based API for TCP sockets.
 type TCPConn = {
@@ -223,6 +223,10 @@ function splitLines(buf: Buffer): Buffer[] {
 }
 
 function validateHeader(header: Buffer): boolean {
+  // Empty header (end of headers section) is valid
+  if (header.length === 0) {
+    return true;
+  }
   const [key, value] = header.toString().split(": ");
   if (key && value) {
     return true;
@@ -285,6 +289,7 @@ function readerFromConnLength(
       // Consume what we need and put the rest back in buffer
       const consume = Math.min(buf.length, remain);
       const result = buf.data.subarray(0, consume);
+      console.log("🚀 ~ readerFromConnLength ~ result:", result.toString());
       remain -= consume;
       bufPop(buf, consume);
       return Buffer.from(result);
@@ -327,6 +332,7 @@ async function writeHTTPResp(conn: TCPConn, res: HTTPRes): Promise<void> {
   await soWrite(conn, headers);
   while (true) {
     const data = await res.body.read();
+    console.log("🚀 ~ writeHTTPResp ~ data:", data.toString());
     if (data.length === 0) {
       break;
     }
@@ -365,15 +371,52 @@ async function newConn(socket: Socket) {
   }
 }
 
-const server = createServer({
-  pauseOnConnect: true, // required by `TCPConn`
-});
+// Async function to start listening on a port
+async function soListen(port: number): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = createServer({
+      pauseOnConnect: true, // required by `TCPConn`
+    });
 
-server.on("connection", newConn);
+    server.on("error", (err) => {
+      reject(err);
+    });
 
-server.listen(1234, () => {
-  console.log("server listening on port 1234");
-});
+    server.listen(port, () => {
+      console.log(`server listening on port ${port}`);
+      resolve(server);
+    });
+  });
+}
+
+// Async function to accept a connection
+async function soAccept(server: Server): Promise<Socket> {
+  return new Promise((resolve) => {
+    server.once("connection", (socket: Socket) => {
+      resolve(socket);
+    });
+  });
+}
+
+// Main server function
+async function startServer() {
+  try {
+    const server = await soListen(1234);
+
+    // Handle connections
+    while (true) {
+      const socket = await soAccept(server);
+      // Process the connection asynchronously without blocking accept loop
+      newConn(socket).catch(console.error);
+    }
+  } catch (err) {
+    console.log("🚀 ~ server error:", err);
+    console.error("Server error:", err);
+  }
+}
+
+// Start the server
+startServer();
 
 // append data to DynBuf
 function bufPush(buf: DynBuf, data: Buffer): void {
